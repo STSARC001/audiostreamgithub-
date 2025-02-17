@@ -22,6 +22,8 @@ async function getRandomAudioFile() {
     }
 }
 
+let currentStream = null;
+
 export async function startStream({ streamKey, streamUrl, videoPath }) {
     console.log('Starting stream with configuration:', {
         streamUrl,
@@ -44,43 +46,75 @@ export async function startStream({ streamKey, streamUrl, videoPath }) {
 
     const streamDestination = `${streamUrl}/${streamKey}`;
 
+    // If there's an existing stream, kill it properly
+    if (currentStream) {
+        try {
+            currentStream.kill('SIGTERM');
+        } catch (error) {
+            console.error('Error killing previous stream:', error);
+        }
+    }
+
     return new Promise((resolve, reject) => {
         console.log('Initializing FFmpeg stream...');
         
-        ffmpeg()
+        const stream = ffmpeg()
             .input(videoPath)
-            .inputOptions(['-stream_loop -1']) // Loop video indefinitely
+            .inputOptions([
+                '-stream_loop -1', // Loop video indefinitely
+                '-re', // Read input at native frame rate
+                '-threads 4' // Limit threads
+            ])
             .input(audioPath)
             .audioCodec('aac')
             .videoCodec('libx264')
             .outputOptions([
-                '-preset veryfast',
-                '-maxrate 2500k',
-                '-bufsize 5000k',
+                '-preset ultrafast', // Fastest encoding
+                '-tune zerolatency', // Minimize latency
+                '-maxrate 1500k', // Reduced bitrate
+                '-bufsize 3000k',
                 '-pix_fmt yuv420p',
-                '-g 60', // Keyframe every 2 seconds (assuming 30 fps)
+                '-g 50',
                 '-c:a aac',
                 '-b:a 128k',
                 '-ar 44100',
-                '-f flv'
+                '-f flv',
+                '-threads 4', // Limit threads
+                '-cpu-used 4' // Reduce CPU usage
             ])
             .on('start', (command) => {
                 console.log('FFmpeg process started with command:', command);
                 console.log('Stream started with audio file:', audioPath);
+                currentStream = stream;
                 resolve();
             })
             .on('error', (err, stdout, stderr) => {
                 console.error('Streaming error:', err.message);
                 console.error('FFmpeg stdout:', stdout);
                 console.error('FFmpeg stderr:', stderr);
+                
+                // If the stream was killed, attempt to restart after a delay
+                if (err.message.includes('SIGKILL')) {
+                    console.log('Stream was killed, attempting restart in 5 seconds...');
+                    setTimeout(() => {
+                        startStream({ streamKey, streamUrl, videoPath })
+                            .catch(err => console.error('Error in restart attempt:', err));
+                    }, 5000);
+                }
+                
                 reject(err);
             })
             .on('end', () => {
                 console.log('Stream ended, restarting with new audio...');
-                // Restart stream with a new random audio file
-                startStream({ streamKey, streamUrl, videoPath })
-                    .catch(err => console.error('Error restarting stream:', err));
-            })
-            .save(streamDestination);
+                currentStream = null;
+                // Restart stream with a new random audio file after a short delay
+                setTimeout(() => {
+                    startStream({ streamKey, streamUrl, videoPath })
+                        .catch(err => console.error('Error restarting stream:', err));
+                }, 2000);
+            });
+
+        // Save with lower quality settings
+        stream.save(streamDestination);
     });
 }
